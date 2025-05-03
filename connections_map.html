@@ -1,0 +1,214 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connections Map</title>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        #map { height: 600px; width: 100%; }
+        #time-filter { position: absolute; top: 10px; left: 10px; z-index: 1000; background: white; padding: 5px; border: 1px solid #ccc; border-radius: 3px; }
+        .legend { position: absolute; bottom: 30px; right: 10px; z-index: 1000; background: white; padding: 10px; border: 1px solid #ccc; border-radius: 3px; }
+        .legend i { width: 18px; height: 18px; float: left; margin-right: 8px; border-radius: 50%; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <label for="time-filter" style="position: absolute; top: 10px; left: 10px; z-index: 1001;">Filter by Time:</label>
+    <select id="time-filter" aria-label="Filter by Time">
+        <option value="12">Last 12 Hours</option>
+        <option value="24">Last 24 Hours</option>
+        <option value="48">Last 48 Hours</option>
+        <option value="168">Last 7 Days</option>
+        <option value="999999">All Time</option>
+    </select>
+    <script>
+        const map = L.map('map').setView([0, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(map);
+
+        const hardwareColors = {
+            "John Deere Device": "#00FF00",
+            "CNH Industrial Device": "#FFA500",
+            "Android Device": "#800080",
+            "Topcon Device": "#FF0000",
+            "Trimble Device": "#00008B",
+            "Trimble GCS900 Device": "#ADD8E6",
+            "iOS Device": "#FFC1CC",
+            "DJI Device": "#808080",
+            "Test Client": "#000000",
+            "Unknown Hardware": "#808080",
+            "Outback Device": "#4B0082",
+            "GNSS Internet Radio": "#808080"
+        };
+
+        let markers = [];
+        const timeFilter = document.getElementById('time-filter');
+
+        async function updateMap() {
+            try {
+                // Fetch pre-saved data from data.json
+                const response = await fetch('data.json');
+                if (!response.ok) throw new Error('Failed to load data.json');
+                const data = await response.json();
+                console.log('Fetched data:', data);  // Debug: Log the data
+
+                if (!Array.isArray(data) || data.length === 0) {
+                    console.warn('Data is empty or not an array');
+                    return;
+                }
+
+                const currentTime = Math.floor(Date.now() / 1000);
+
+                // Clear existing markers and legend
+                markers.forEach(marker => map.removeLayer(marker));
+                map.eachLayer(layer => {
+                    if (layer instanceof L.Control) map.removeControl(layer);
+                });
+                markers = [];
+
+                // Filter and add new markers
+                const hours = parseInt(timeFilter.value);
+                const timeThreshold = hours === 999999 ? 0 : currentTime - (hours * 3600);
+
+                const hardwareTypes = new Set();
+                data.forEach(point => {
+                    const epochTime = parseTimestamp(point.timestamp);
+                    if (epochTime < timeThreshold) {
+                        console.log('Filtered out due to timestamp:', point.timestamp, epochTime, timeThreshold);
+                        return;
+                    }
+
+                    const hardware = extractHardware(point.request);
+                    hardwareTypes.add(hardware);
+
+                    if (point.latitude && point.longitude && point.latitude !== 0 && point.longitude !== 0) {
+                        const marker = L.circleMarker([point.latitude, point.longitude], {
+                            radius: 5,
+                            color: hardwareColors[hardware] || '#808080',
+                            fillOpacity: 0.8
+                        }).addTo(map)
+                          .bindPopup(`<b>${point.name || 'Connection'}</b><br>Hardware: ${hardware}<br>Timestamp: ${point.timestamp}`);
+                        markers.push(marker);
+                    } else {
+                        console.warn('Invalid lat/lng for point:', point);
+                    }
+                });
+
+                console.log('Hardware types:', Array.from(hardwareTypes));  // Debug: Log hardware types
+                console.log('Markers added:', markers.length);  // Debug: Log number of markers
+
+                // Update legend
+                updateLegend(hardwareTypes);
+
+                // Adjust map view
+                if (markers.length > 0) {
+                    const bounds = L.latLngBounds(markers.map(marker => marker.getLatLng()));
+                    map.fitBounds(bounds);
+                } else {
+                    console.warn('No markers to display');
+                }
+            } catch (error) {
+                console.error('Error updating map:', error);
+            }
+        }
+
+        function parseTimestamp(timestamp) {
+            try {
+                // Handle format: YYYY/MM/DD HH:mm:ss
+                const match = timestamp.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+                if (!match) {
+                    console.error('Invalid timestamp format:', timestamp);
+                    return 0;
+                }
+                const [, year, month, day, hour, minute, second] = match;
+                const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+                return Math.floor(date.getTime() / 1000);
+            } catch (e) {
+                console.error('Error parsing timestamp:', timestamp, e);
+                return 0;
+            }
+        }
+
+        function extractHardware(request) {
+            if (!request) return "Unknown Hardware";
+            const hardwareMap = {
+                "Cloudbase|John\\s*Deere|JD": "John Deere Device",
+                "CNHiNTRIPClient|CNH": "CNH Industrial Device",
+                "LefebureAndroidIntNTRIPClient|Android": "Android Device",
+                "TopconNtrip|Topcon": "Topcon Device",
+                "TnlAgClient|Trimble": "Trimble Device",
+                "GCS900\\s*Client": "Trimble GCS900 Device",
+                "SWMAPS_IOS|iOS": "iOS Device",
+                "DJI_CSDK_NTRIP_CLIENT|DJI": "DJI Device",
+                "Checker": "Test Client",
+                "Outback": "Outback Device",
+                "GNSSInternetRadio": "GNSS Internet Radio"
+            };
+            for (const [pattern, hardware] of Object.entries(hardwareMap)) {
+                if (new RegExp(pattern, 'i').test(request)) return hardware;
+            }
+            return "Unknown Hardware";
+        }
+
+        function updateLegend(hardwareTypes) {
+            const legend = L.control({position: 'bottomright'});
+            legend.onAdd = function() {
+                const div = L.DomUtil.create('div', 'legend');
+                div.innerHTML = '<b>Legend</b><br>';
+                hardwareTypes.forEach(hardware => {
+                    const color = hardwareColors[hardware] || '#808080';
+                    div.innerHTML += `<i style="background:${color}"></i> ${hardware}<br>`;
+                });
+                return div;
+            };
+            legend.addTo(map);
+        }
+
+        // Initial load
+        updateMap();
+        timeFilter.addEventListener('change', updateMap);
+    </script>
+</body>
+</html>
