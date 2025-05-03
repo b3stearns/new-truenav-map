@@ -88,11 +88,10 @@
 
         async function updateMap() {
             try {
-                // Fetch pre-saved data from data.json
-                const response = await fetch('data.json');
-                if (!response.ok) throw new Error('Failed to load data.json');
+                const response = await fetch('markers_data.json');
+                if (!response.ok) throw new Error('Failed to load markers_data.json');
                 const data = await response.json();
-                console.log('Fetched data:', data);  // Debug: Log the data
+                console.log('Fetched data:', data);
 
                 if (!Array.isArray(data) || data.length === 0) {
                     console.warn('Data is empty or not an array');
@@ -101,48 +100,54 @@
 
                 const currentTime = Math.floor(Date.now() / 1000);
 
-                // Clear existing markers and legend
                 markers.forEach(marker => map.removeLayer(marker));
                 map.eachLayer(layer => {
                     if (layer instanceof L.Control) map.removeControl(layer);
                 });
                 markers = [];
 
-                // Filter and add new markers
                 const hours = parseInt(timeFilter.value);
                 const timeThreshold = hours === 999999 ? 0 : currentTime - (hours * 3600);
 
                 const hardwareTypes = new Set();
                 data.forEach(point => {
-                    const epochTime = parseTimestamp(point.timestamp);
+                    // Determine epochTime: use epochTime if available, otherwise parse timestamp
+                    let epochTime = point.epochTime || 0;
+                    if (!epochTime && point.timestamp) {
+                        epochTime = parseTimestamp(point.timestamp);
+                    }
+
                     if (epochTime < timeThreshold) {
-                        console.log('Filtered out due to timestamp:', point.timestamp, epochTime, timeThreshold);
+                        console.log('Filtered out due to timestamp:', epochTime, timeThreshold);
                         return;
                     }
 
-                    const hardware = extractHardware(point.request);
+                    const latitude = point.lat || point.latitude || 0;
+                    const longitude = point.lng || point.longitude || 0;
+                    if (latitude === 0 || longitude === 0) {
+                        console.warn('Invalid lat/lng for point:', point);
+                        return;
+                    }
+
+                    const name = point.username || point.name || 'Unknown';
+                    const hardware = point.hardware || extractHardware(point.request) || 'Unknown Hardware';
+                    const timestampDisplay = point.timestamp || epochToTimestamp(epochTime);
                     hardwareTypes.add(hardware);
 
-                    if (point.latitude && point.longitude && point.latitude !== 0 && point.longitude !== 0) {
-                        const marker = L.circleMarker([point.latitude, point.longitude], {
-                            radius: 5,
-                            color: hardwareColors[hardware] || '#808080',
-                            fillOpacity: 0.8
-                        }).addTo(map)
-                          .bindPopup(`<b>${point.name || 'Connection'}</b><br>Hardware: ${hardware}<br>Timestamp: ${point.timestamp}`);
-                        markers.push(marker);
-                    } else {
-                        console.warn('Invalid lat/lng for point:', point);
-                    }
+                    const marker = L.circleMarker([latitude, longitude], {
+                        radius: 5,
+                        color: hardwareColors[hardware] || '#808080',
+                        fillOpacity: 0.8
+                    }).addTo(map)
+                      .bindPopup(`<b>${name}</b><br>Hardware: ${hardware}<br>Timestamp: ${timestampDisplay}`);
+                    markers.push(marker);
                 });
 
-                console.log('Hardware types:', Array.from(hardwareTypes));  // Debug: Log hardware types
-                console.log('Markers added:', markers.length);  // Debug: Log number of markers
+                console.log('Hardware types:', Array.from(hardwareTypes));
+                console.log('Markers added:', markers.length);
 
-                // Update legend
                 updateLegend(hardwareTypes);
 
-                // Adjust map view
                 if (markers.length > 0) {
                     const bounds = L.latLngBounds(markers.map(marker => marker.getLatLng()));
                     map.fitBounds(bounds);
@@ -156,7 +161,6 @@
 
         function parseTimestamp(timestamp) {
             try {
-                // Handle format: YYYY/MM/DD HH:mm:ss
                 const match = timestamp.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
                 if (!match) {
                     console.error('Invalid timestamp format:', timestamp);
@@ -168,6 +172,22 @@
             } catch (e) {
                 console.error('Error parsing timestamp:', timestamp, e);
                 return 0;
+            }
+        }
+
+        function epochToTimestamp(epochTime) {
+            try {
+                const date = new Date(epochTime * 1000);
+                const year = date.getUTCFullYear();
+                const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+                const day = String(date.getUTCDate()).padStart(2, '0');
+                const hours = String(date.getUTCHours()).padStart(2, '0');
+                const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+                const seconds = String(date.getUTCSeconds()).padStart(2, '0');
+                return `${year}/${month}/${day} ${hours}:${minutes}:${seconds}`;
+            } catch (e) {
+                console.error('Error converting epoch time:', epochTime, e);
+                return 'Unknown';
             }
         }
 
@@ -206,7 +226,6 @@
             legend.addTo(map);
         }
 
-        // Initial load
         updateMap();
         timeFilter.addEventListener('change', updateMap);
     </script>
